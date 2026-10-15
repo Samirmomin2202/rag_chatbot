@@ -40,6 +40,10 @@ export async function register(displayName, email, password) {
   }, false);
 }
 
+export async function getOAuthProviders() {
+  return request("/api/auth/oauth/providers", {}, false);
+}
+
 export async function getCurrentUser() {
   return request("/api/auth/me");
 }
@@ -59,6 +63,17 @@ export async function updateUserRole(userId, role) {
     method: "PATCH", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ role }),
   });
+}
+
+export async function updateUserDetails(userId, displayName, email) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}`, {
+    method: "PATCH", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ display_name: displayName, email }),
+  });
+}
+
+export async function deleteUser(userId) {
+  return request(`/api/admin/users/${encodeURIComponent(userId)}`, { method: "DELETE" });
 }
 
 export async function sendChatMessage(message, conversationId, image = null) {
@@ -84,6 +99,10 @@ export async function fetchConversationImage(conversationId, messageId) {
 export async function getConversations() {
   const data = await request("/api/conversations");
   return data.conversations || [];
+}
+
+export async function deleteConversation(conversationId) {
+  return request(`/api/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE" });
 }
 
 export async function uploadPdf(file) {

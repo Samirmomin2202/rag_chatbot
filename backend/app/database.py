@@ -106,6 +106,14 @@ def list_conversations(owner_id: str, limit: int = 50):
         }},
     ]))
 
+def delete_conversation(conversation_id: str, owner_id: str):
+    get_database()
+    result = messages_collection.delete_many({
+        "conversation_id": conversation_id,
+        "owner_id": owner_id,
+    })
+    return result.deleted_count
+
 def retrieve_related_memories(query: str, owner_id: str, exclude_conversation_id: str, limit: int = 3):
     get_database()
     candidates = list(messages_collection.find(
@@ -148,6 +156,17 @@ def find_user_by_id(user_id: str):
     get_database()
     return users_collection.find_one({"user_id": user_id})
 
+def find_user_by_oauth_identity(provider: str, provider_id: str):
+    get_database()
+    return users_collection.find_one({f"oauth.{provider}.id": provider_id})
+
+def set_user_oauth_identity(user_id: str, provider: str, provider_id: str):
+    get_database()
+    return users_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {f"oauth.{provider}.id": provider_id}},
+    )
+
 def create_user(user: dict):
     get_database()
     users_collection.insert_one(user)
@@ -187,6 +206,19 @@ def record_user_usage(user_id: str, usage: dict):
 def set_user_role(user_id: str, role: str):
     get_database()
     return users_collection.update_one({"user_id": user_id}, {"$set": {"role": role}})
+
+def update_user_details(user_id: str, display_name: str, email: str):
+    get_database()
+    return users_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"display_name": display_name, "email": email}},
+    )
+
+def delete_user_data(user_id: str):
+    get_database()
+    messages_collection.delete_many({"owner_id": user_id})
+    documents_collection.delete_many({"owner_id": user_id})
+    return users_collection.delete_one({"user_id": user_id}).deleted_count
 
 def assign_legacy_conversations(owner_id: str):
     """Keep pre-login local conversations available to the initial admin."""
