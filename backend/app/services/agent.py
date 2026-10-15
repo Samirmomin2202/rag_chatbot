@@ -170,27 +170,44 @@ def generate_answer(
     owner_id: str,
     is_admin: bool = False,
     memories: list[dict] | None = None,
+    reference_image: dict | None = None,
 ) -> dict:
     client = get_groq_client()
-    has_image = any(message.get("image") for message in history)
+    has_image = bool(reference_image and reference_image.get("image")) or any(message.get("image") for message in history)
     if has_image:
         usage = _empty_usage(settings.GROQ_VISION_MODEL)
-        image_index = next(i for i in range(len(history) - 1, -1, -1) if history[i].get("image"))
-        image_message = history[image_index]
-        # Vision requests have a lower input-token budget. Keep a small amount of
-        # recent text context and omit tool schemas to leave room for image tokens.
+        image_index = next((i for i in range(len(history) - 1, -1, -1) if history[i].get("image")), None)
+        if reference_image and reference_image.get("image"):
+            image_message = reference_image
+        else:
+            image_message = history[image_index]
+        # Keep recent conversation text and the latest image, but omit tool schemas
+        # to reserve the vision model's input budget for visual content.
+        context_history = history
+        current_image_in_history = image_index is not None and image_message.get("image") == history[image_index].get("image")
+        if current_image_in_history and image_index == len(history) - 1:
+            context_history = history[:image_index]
         context = [
             {"role": item["role"], "content": item["content"][-600:]}
-            for item in history[:image_index]
+            for item in context_history
             if not item.get("image")
-        ][-4:]
+        ][-8:]
         vision_messages = [{
             "role": "system",
-            "content": "You are a helpful assistant. Answer the user's question using the attached image and recent conversation context. Be clear and concise; if something is not visible, say so.",
+            "content": (
+                "You are a helpful assistant with vision. Answer the latest user question directly using the attached image and conversation context. "
+                "Read visible labels, table headers, categories, values, and names carefully. If asked to list, filter, compare, or identify items from the image, "
+                "do that from the image and include the relevant values. Do not claim the image is unavailable when it is attached. If a detail truly cannot be read, "
+                "state which detail is unclear and answer the rest that is visible. Do not invent missing data."
+            ),
         }, *context, {
             "role": "user",
             "content": [
-                {"type": "text", "text": image_message["content"]},
+                {"type": "text", "text": (
+                    image_message.get("content", "")
+                    if current_image_in_history
+                    else "Use this image as a reference for the latest question in the conversation."
+                )},
                 {"type": "image_url", "image_url": {"url": image_message["image"]}},
             ],
         }]

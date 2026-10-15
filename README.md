@@ -42,6 +42,21 @@ creates that administrator account. New registrations receive the `user` role.
 Users can upload and search their own PDFs and access only their own conversation
 history. Admins can change account roles and see/search every user's PDFs.
 
+Optional Google and GitHub sign-in uses the same application JWT session as
+password login. Create OAuth applications with these callback URLs:
+
+- Google: `http://localhost:8000/api/auth/oauth/google/callback`
+- GitHub: `http://localhost:8000/api/auth/oauth/github/callback`
+
+Set `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `GITHUB_CLIENT_ID`, and
+`GITHUB_CLIENT_SECRET` in `backend/.env`. Set `OAUTH_REDIRECT_BASE_URL` to the
+backend's public base URL and `OAUTH_FRONTEND_URL` to the frontend URL to return
+to after sign-in. For example, if Vite runs at `http://127.0.0.1:5174`, set
+`OAUTH_FRONTEND_URL=http://127.0.0.1:5174` and register the exact callback URLs
+for the backend address you use. Social accounts are matched by verified email;
+new social accounts are created with the standard `user` role. Keep provider
+client secrets in `backend/.env` and never put them in frontend variables.
+
 Generate a secret in PowerShell with:
 ```powershell
 python -c "import secrets; print(secrets.token_urlsafe(48))"

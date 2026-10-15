@@ -2,13 +2,17 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import time
 from datetime import datetime, timezone
+from urllib.parse import urlencode
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+import httpx
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
 from pymongo.errors import ServerSelectionTimeoutError
@@ -22,12 +26,34 @@ from app.database import (
     set_user_role,
     assign_legacy_conversations,
     get_user_usage,
+    find_user_by_oauth_identity,
+    set_user_oauth_identity,
+    update_user_details,
+    delete_user_data,
 )
+from app.chroma_store import documents_collection as chroma_documents
 
 router = APIRouter(prefix="/api/auth", tags=["authentication"])
 admin_router = APIRouter(prefix="/api/admin", tags=["administration"])
 bearer = HTTPBearer(auto_error=False)
 PBKDF2_ROUNDS = 310_000
+OAUTH_STATE_COOKIE = "advanced-rag-oauth-state"
+OAUTH_PROVIDERS = {
+    "google": {
+        "client_id": "GOOGLE_CLIENT_ID",
+        "client_secret": "GOOGLE_CLIENT_SECRET",
+        "authorize_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "scope": "openid email profile",
+    },
+    "github": {
+        "client_id": "GITHUB_CLIENT_ID",
+        "client_secret": "GITHUB_CLIENT_SECRET",
+        "authorize_url": "https://github.com/login/oauth/authorize",
+        "token_url": "https://github.com/login/oauth/access_token",
+        "scope": "read:user user:email",
+    },
+}
 
 
 class Registration(BaseModel):
@@ -43,6 +69,11 @@ class Login(BaseModel):
 
 class RoleUpdate(BaseModel):
     role: str
+
+
+class UserDetailsUpdate(BaseModel):
+    display_name: str = Field(min_length=1, max_length=80)
+    email: str = Field(min_length=3, max_length=254)
 
 
 def _auth_secret() -> bytes:
@@ -178,6 +209,128 @@ def _auth_response(user: dict) -> dict:
     return {"access_token": _issue_token(user), "token_type": "bearer", "user": _public_user(user)}
 
 
+def _oauth_credentials(provider: str):
+    config = OAUTH_PROVIDERS[provider]
+    client_id = getattr(settings, config["client_id"])
+    client_secret = getattr(settings, config["client_secret"])
+    if not client_id or not client_secret:
+        raise HTTPException(status_code=503, detail=f"{provider.title()} sign-in is not configured on the server.")
+    return config, client_id, client_secret
+
+
+@router.get("/oauth/providers")
+def oauth_providers():
+    return {"providers": {
+        provider: bool(getattr(settings, config["client_id"]) and getattr(settings, config["client_secret"]))
+        for provider, config in OAUTH_PROVIDERS.items()
+    }}
+
+
+@router.get("/oauth/{provider}/start")
+def oauth_start(provider: str):
+    if provider not in OAUTH_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Sign-in provider not found.")
+    config, client_id, _ = _oauth_credentials(provider)
+    state = secrets.token_urlsafe(32)
+    callback = f"{settings.OAUTH_REDIRECT_BASE_URL.rstrip('/')}/api/auth/oauth/{provider}/callback"
+    query = urlencode({
+        "client_id": client_id,
+        "redirect_uri": callback,
+        "response_type": "code",
+        "scope": config["scope"],
+        "state": state,
+    })
+    response = RedirectResponse(f"{config['authorize_url']}?{query}", status_code=302)
+    response.set_cookie(
+        OAUTH_STATE_COOKIE, f"{provider}:{state}", max_age=600, httponly=True,
+        secure=settings.OAUTH_REDIRECT_BASE_URL.startswith("https://"),
+        samesite="lax", path=f"/api/auth/oauth/{provider}/callback",
+    )
+    return response
+
+
+def _google_profile(access_token: str):
+    response = httpx.get(
+        "https://openidconnect.googleapis.com/v1/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"}, timeout=15,
+    )
+    response.raise_for_status()
+    profile = response.json()
+    if not profile.get("sub") or not profile.get("email") or profile.get("email_verified") is not True:
+        raise HTTPException(status_code=401, detail="Google did not provide a verified email address.")
+    return str(profile["sub"]), profile["email"], profile.get("name") or profile["email"].split("@", 1)[0]
+
+
+def _github_profile(access_token: str):
+    headers = {
+        "Authorization": f"Bearer {access_token}", "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    profile_response = httpx.get("https://api.github.com/user", headers=headers, timeout=15)
+    profile_response.raise_for_status()
+    profile = profile_response.json()
+    email_response = httpx.get("https://api.github.com/user/emails", headers=headers, timeout=15)
+    email_response.raise_for_status()
+    email = next((item["email"] for item in email_response.json() if item.get("primary") and item.get("verified")), None)
+    if not profile.get("id") or not email:
+        raise HTTPException(status_code=401, detail="GitHub did not provide a verified primary email address.")
+    return str(profile["id"]), email, profile.get("name") or profile.get("login") or email.split("@", 1)[0]
+
+
+def _frontend_oauth_redirect(provider: str, token: str | None = None, error: str | None = None):
+    fragment = urlencode({"access_token": token} if token else {"oauth_error": error or "Sign-in failed."})
+    response = RedirectResponse(f"{settings.OAUTH_FRONTEND_URL.rstrip('/')}/#{fragment}", status_code=303)
+    response.delete_cookie(OAUTH_STATE_COOKIE, path=f"/api/auth/oauth/{provider}/callback")
+    return response
+
+
+@router.get("/oauth/{provider}/callback")
+def oauth_callback(provider: str, request: Request, code: str = "", state: str = ""):
+    if provider not in OAUTH_PROVIDERS:
+        raise HTTPException(status_code=404, detail="Sign-in provider not found.")
+    try:
+        cookie_state = request.cookies.get(OAUTH_STATE_COOKIE, "")
+        if not state or not hmac.compare_digest(cookie_state, f"{provider}:{state}"):
+            raise HTTPException(status_code=400, detail="Sign-in expired or state validation failed. Please try again.")
+        if not code:
+            raise HTTPException(status_code=400, detail="The provider did not return an authorization code.")
+        config, client_id, client_secret = _oauth_credentials(provider)
+        callback = f"{settings.OAUTH_REDIRECT_BASE_URL.rstrip('/')}/api/auth/oauth/{provider}/callback"
+        token_response = httpx.post(config["token_url"], data={
+            "client_id": client_id, "client_secret": client_secret, "code": code,
+            "redirect_uri": callback, "grant_type": "authorization_code",
+        }, headers={"Accept": "application/json"}, timeout=15)
+        token_response.raise_for_status()
+        access_token = token_response.json().get("access_token")
+        if not access_token:
+            raise HTTPException(status_code=401, detail="The provider did not issue an access token.")
+        provider_id, email, name = _google_profile(access_token) if provider == "google" else _github_profile(access_token)
+        email = _email(email)
+        _ensure_admin()
+        user = find_user_by_oauth_identity(provider, provider_id)
+        if not user:
+            user = find_user_by_email(email)
+            if not user:
+                user = {
+                    "user_id": str(uuid4()), "email": email, "display_name": name[:80],
+                    "role": "user", "created_at": datetime.now(timezone.utc),
+                }
+                create_user(user)
+            set_user_oauth_identity(user["user_id"], provider, provider_id)
+            user = find_user_by_id(user["user_id"])
+        return _frontend_oauth_redirect(provider, token=_issue_token(user))
+    except HTTPException as exc:
+        return _frontend_oauth_redirect(provider, error=exc.detail)
+    except ServerSelectionTimeoutError as exc:
+        try:
+            _raise_database_unavailable(exc)
+        except HTTPException as db_exc:
+            return _frontend_oauth_redirect(provider, error=db_exc.detail)
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        logging.warning("%s OAuth failed: %s", provider.title(), type(exc).__name__)
+        return _frontend_oauth_redirect(provider, error=f"Could not sign in with {provider.title()}. Please try again.")
+
+
 @router.post("/register")
 def register(body: Registration):
     _auth_secret()
@@ -237,7 +390,46 @@ def update_role(user_id: str, body: RoleUpdate, actor: dict = Depends(admin_user
         raise HTTPException(status_code=422, detail="Role must be 'user' or 'admin'.")
     if actor["user_id"] == user_id and body.role != "admin":
         raise HTTPException(status_code=400, detail="You cannot remove your own administrator role.")
-    if not find_user_by_id(user_id):
+    target = find_user_by_id(user_id)
+    if not target:
         raise HTTPException(status_code=404, detail="User not found.")
+    if target.get("role") == "admin" and body.role != "admin" and sum(user.get("role") == "admin" for user in list_users()) <= 1:
+        raise HTTPException(status_code=400, detail="Promote another administrator before demoting the last admin account.")
     set_user_role(user_id, body.role)
     return {"message": "Role updated.", "user_id": user_id, "role": body.role}
+
+
+@admin_router.patch("/users/{user_id}")
+def edit_user(user_id: str, body: UserDetailsUpdate, _: dict = Depends(admin_user)):
+    existing = find_user_by_id(user_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="User not found.")
+    email = _email(body.email)
+    duplicate = find_user_by_email(email)
+    if duplicate and duplicate["user_id"] != user_id:
+        raise HTTPException(status_code=409, detail="Another account already uses that email.")
+    display_name = body.display_name.strip()
+    if not display_name:
+        raise HTTPException(status_code=422, detail="Name cannot be empty.")
+    update_user_details(user_id, display_name, email)
+    return {"message": "User details updated.", "user_id": user_id}
+
+
+@admin_router.delete("/users/{user_id}")
+def remove_user(user_id: str, actor: dict = Depends(admin_user)):
+    if actor["user_id"] == user_id:
+        raise HTTPException(status_code=400, detail="You cannot delete your own administrator account.")
+    target = find_user_by_id(user_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if target.get("role") == "admin" and sum(user.get("role") == "admin" for user in list_users()) <= 1:
+        raise HTTPException(status_code=400, detail="Promote another administrator before deleting the last admin account.")
+    try:
+        chroma_documents.delete(where={"owner_id": user_id})
+        deleted = delete_user_data(user_id)
+    except Exception as exc:
+        logging.exception("Could not fully delete user %s", user_id)
+        raise HTTPException(status_code=500, detail="Could not delete the account and its stored data.") from exc
+    if not deleted:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return {"message": "User and associated data deleted.", "user_id": user_id}

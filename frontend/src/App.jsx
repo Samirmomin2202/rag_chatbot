@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  Bot, Calculator, FileSearch, MessageSquare, Plus, Send, Copy, Check, ImagePlus, X,
+  Bot, Calculator, FileSearch, MessageSquare, Plus, Send, Copy, Check, ImagePlus, X, Trash2,
   Sparkles, Wrench, Paperclip, FileText, CheckCircle2, Shield, LogOut, Users, Sun, Moon, Activity
 } from "lucide-react";
 import {
-  fetchConversation, fetchConversationImage, sendChatMessage, uploadPdf, getDocuments, getConversations,
-  login, register, getCurrentUser, saveAuthSession, clearAuthSession, getUsers, updateUserRole, getUsage
+  fetchConversation, fetchConversationImage, sendChatMessage, uploadPdf, getDocuments, getConversations, deleteConversation,
+  login, register, getOAuthProviders, getCurrentUser, saveAuthSession, clearAuthSession, getUsers, updateUserRole, updateUserDetails, deleteUser, getUsage
 } from "./api";
 
 const STORAGE_KEY = "advanced-rag-conversation-id";
@@ -149,7 +149,7 @@ function CodeBlock({ code, language }) {
   </section>;
 }
 
-function MessageImage({ image, conversationId, messageId }) {
+function MessageImage({ image, conversationId, messageId, onOpen }) {
   const imageRef = useRef(null);
   const [src, setSrc] = useState(() => image?.startsWith("data:image/") ? image : "");
   const [failed, setFailed] = useState(false);
@@ -170,16 +170,54 @@ function MessageImage({ image, conversationId, messageId }) {
   }, [src]);
 
   if (!src) return <div ref={imageRef} className="message-image-placeholder">{failed ? "Image unavailable" : "Image · loads when visible"}</div>;
-  return <img className="message-image" src={src} alt="Image attached to this message" loading="lazy" />;
+  return <button type="button" className="message-image-trigger" onClick={() => onOpen(src)} aria-label="Open attached image">
+    <img className="message-image" src={src} alt="Image attached to this message. Click to view full size." loading="lazy" />
+  </button>;
 }
 
-function AuthScreen({ onSuccess, theme, onToggleTheme }) {
+function UsageGraph({ usage }) {
+  const values = [
+    { label: "Input tokens", value: Number(usage.input_tokens) || 0, color: "input" },
+    { label: "Output tokens", value: Number(usage.output_tokens) || 0, color: "output" },
+  ];
+  const max = Math.max(...values.map(item => item.value), 1);
+
+  return (
+    <section className="usage-chart" aria-labelledby="usage-chart-title">
+      <div className="usage-chart-heading">
+        <div><h2 id="usage-chart-title">Token usage breakdown</h2><p>Lifetime totals since usage tracking began</p></div>
+        <span>{formatTokens(usage.total_tokens)} total tokens</span>
+      </div>
+      <div className="usage-bars" role="img" aria-label={`Input tokens: ${formatTokens(values[0].value)}. Output tokens: ${formatTokens(values[1].value)}.`}>
+        {values.map(item => <div className="usage-bar-row" key={item.label}>
+          <span className="usage-bar-label">{item.label}</span>
+          <div className="usage-bar-track"><div className={`usage-bar-fill ${item.color}`} style={{ width: `${item.value ? Math.max(item.value / max * 100, 1) : 0}%` }} /></div>
+          <strong>{formatTokens(item.value)}</strong>
+        </div>)}
+      </div>
+      {!usage.total_tokens && <p className="usage-chart-empty">Send a chat message to see usage here.</p>}
+    </section>
+  );
+}
+
+function AuthScreen({ onSuccess, theme, onToggleTheme, oauthError }) {
   const [isRegister, setIsRegister] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
+  const [oauthProviders, setOAuthProviders] = useState({});
+
+  useEffect(() => {
+    getOAuthProviders().then(result => setOAuthProviders(result.providers || {})).catch(() => setOAuthProviders({}));
+  }, []);
+
+  function startOAuth(provider) {
+    setError("");
+    setPending(true);
+    window.location.assign(`${import.meta.env.VITE_API_BASE_URL || "http://localhost:8000"}/api/auth/oauth/${provider}/start`);
+  }
 
   async function submit(event) {
     event.preventDefault(); setError(""); setPending(true);
@@ -201,8 +239,14 @@ function AuthScreen({ onSuccess, theme, onToggleTheme }) {
       {isRegister && <label>Name<input required autoComplete="name" maxLength={80} value={displayName} onChange={event => setDisplayName(event.target.value)} /></label>}
       <label>Email<input required type="email" autoComplete="email" value={email} onChange={event => setEmail(event.target.value)} /></label>
       <label>Password<input required type="password" autoComplete={isRegister ? "new-password" : "current-password"} minLength={isRegister ? 10 : 1} value={password} onChange={event => setPassword(event.target.value)} /></label>
-      {error && <div className="error-banner auth-error">{error}</div>}
+      {(error || oauthError) && <div className="error-banner auth-error">{error || oauthError}</div>}
       <button className="auth-submit" disabled={pending}>{pending ? "Please wait..." : isRegister ? "Create account" : "Sign in"}</button>
+      <div className="auth-divider"><span>or continue with</span></div>
+      <div className="oauth-buttons">
+        <button type="button" className="oauth-button" disabled={pending || !oauthProviders.google} onClick={() => startOAuth("google")}><GoogleMark />Google</button>
+        <button type="button" className="oauth-button" disabled={pending || !oauthProviders.github} onClick={() => startOAuth("github")}><GithubMark />GitHub</button>
+      </div>
+      {!oauthProviders.google && !oauthProviders.github && <small className="oauth-hint">Google and GitHub sign-in need provider credentials configured by the administrator.</small>}
       <button type="button" className="auth-switch" onClick={() => { setIsRegister(!isRegister); setError(""); }}>
         {isRegister ? "Already have an account? Sign in" : "New here? Create an account"}
       </button>
@@ -211,10 +255,21 @@ function AuthScreen({ onSuccess, theme, onToggleTheme }) {
   </main>;
 }
 
+function GoogleMark() {
+  return <svg aria-hidden="true" viewBox="0 0 48 48" width="17" height="17"><path fill="#FFC107" d="M43.6 24.5c0-1.4-.1-2.8-.4-4.1H24v7.8h11a9.4 9.4 0 0 1-4.1 6.2v5.1h6.7c3.9-3.6 6-8.9 6-15Z"/><path fill="#34A853" d="M24 44c5.5 0 10.1-1.8 13.5-4.8l-6.7-5.1c-1.8 1.2-4 1.9-6.8 1.9-5.2 0-9.6-3.5-11.2-8.2H5.9v5.3A20 20 0 0 0 24 44Z"/><path fill="#4A90E2" d="M12.8 27.8a12 12 0 0 1 0-7.6v-5.3H5.9a20 20 0 0 0 0 18.2l6.9-5.3Z"/><path fill="#EA4335" d="M24 12c3 0 5.7 1 7.8 3.1l5.8-5.8A19.4 19.4 0 0 0 24 4 20 20 0 0 0 5.9 14.9l6.9 5.3C14.4 15.5 18.8 12 24 12Z"/></svg>;
+}
+
+function GithubMark() {
+  return <svg aria-hidden="true" viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M12 .9a11.1 11.1 0 0 0-3.5 21.6c.6.1.8-.2.8-.5v-2c-3.3.7-4-1.4-4-1.4-.5-1.3-1.3-1.6-1.3-1.6-1.1-.8.1-.8.1-.8 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.6-1.3-5.6-6.2 0-1.4.5-2.5 1.2-3.4-.1-.3-.5-1.6.1-3.3 0 0 1-.3 3.5 1.3a12.2 12.2 0 0 1 6.4 0c2.4-1.6 3.5-1.3 3.5-1.3.7 1.7.3 3 .2 3.3.8.9 1.2 2 1.2 3.4 0 4.9-3 5.9-5.7 6.2.5.4.9 1.1.9 2.2V22c0 .3.2.6.8.5A11.1 11.1 0 0 0 12 .9Z"/></svg>;
+}
+
 function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem("advanced-rag-theme") || "light");
   const [user, setUser] = useState(() => {
     try { return JSON.parse(localStorage.getItem("advanced-rag-auth-user") || "null"); } catch { return null; }
+  });
+  const [oauthError, setOAuthError] = useState(() => {
+    try { return new URLSearchParams(window.location.hash.slice(1)).get("oauth_error") || ""; } catch { return ""; }
   });
   const [authReady, setAuthReady] = useState(false);
   const [conversationId, setConversationId] = useState(() => localStorage.getItem(STORAGE_KEY) || "");
@@ -229,8 +284,12 @@ function App() {
   const [conversations, setConversations] = useState([]);
   const [activeView, setActiveView] = useState("chat");
   const [users, setUsers] = useState([]);
+  const [editingUser, setEditingUser] = useState(null);
+  const [editUserName, setEditUserName] = useState("");
+  const [editUserEmail, setEditUserEmail] = useState("");
   const [usage, setUsage] = useState({ input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0, requests: 0 });
   const [selectedDocument, setSelectedDocument] = useState(null);
+  const [selectedImage, setSelectedImage] = useState("");
   const [specificDocumentId, setSpecificDocumentId] = useState("");
   const [specificQuery, setSpecificQuery] = useState("");
   const fileInput = useRef(null);
@@ -243,8 +302,18 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const oauthToken = params.get("access_token");
+    if (oauthToken || params.has("oauth_error")) {
+      window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+    }
+    if (oauthToken) saveAuthSession(oauthToken, {});
     if (!localStorage.getItem("advanced-rag-auth-token")) { setAuthReady(true); return; }
-    getCurrentUser().then(result => setUser(result.user)).catch(() => {
+    getCurrentUser().then(result => {
+      if (oauthToken) saveAuthSession(oauthToken, result.user);
+      setUser(result.user);
+      setOAuthError("");
+    }).catch(() => {
       clearAuthSession(); setUser(null);
     }).finally(() => setAuthReady(true));
   }, []);
@@ -282,6 +351,24 @@ function App() {
     try { setConversations(await getConversations()); } catch { /* API may be offline */ }
   }
 
+  async function handleDeleteConversation(event, conversation) {
+    event.stopPropagation();
+    const title = conversation.title || "this conversation";
+    if (!window.confirm(`Delete “${title}” and all its messages? This cannot be undone.`)) return;
+    setError("");
+    try {
+      await deleteConversation(conversation.conversation_id);
+      setConversations(current => current.filter(item => item.conversation_id !== conversation.conversation_id));
+      if (conversationId === conversation.conversation_id) {
+        setConversationId("");
+        setMessages([]);
+        localStorage.removeItem(STORAGE_KEY);
+      }
+    } catch (err) {
+      setError(err.message || "Could not delete conversation.");
+    }
+  }
+
   useEffect(() => { if (user) refreshConversations(); }, [user]);
 
   useEffect(() => {
@@ -293,6 +380,13 @@ function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    if (!selectedImage) return undefined;
+    const closeOnEscape = event => { if (event.key === "Escape") setSelectedImage(""); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [selectedImage]);
 
   async function handleSend(event) {
     event?.preventDefault();
@@ -360,6 +454,38 @@ function App() {
     } catch (err) { setError(err.message || "Could not update role."); }
   }
 
+  function startEditingUser(account) {
+    setEditingUser(account);
+    setEditUserName(account.display_name);
+    setEditUserEmail(account.email);
+    setError("");
+  }
+
+  async function saveUserDetails(event) {
+    event.preventDefault();
+    try {
+      await updateUserDetails(editingUser.user_id, editUserName, editUserEmail);
+      setUsers(await getUsers());
+      setEditingUser(null);
+      setNotice("User details updated.");
+      setError("");
+    } catch (err) {
+      setError(err.message || "Could not update user details.");
+    }
+  }
+
+  async function handleDeleteUser(account) {
+    if (!window.confirm(`Delete ${account.display_name} (${account.email}) and all of their conversations and uploaded PDF data? This cannot be undone.`)) return;
+    setError("");
+    try {
+      await deleteUser(account.user_id);
+      setUsers(current => current.filter(item => item.user_id !== account.user_id));
+      setNotice(`${account.display_name}'s account and stored data were deleted.`);
+    } catch (err) {
+      setError(err.message || "Could not delete this account.");
+    }
+  }
+
   function finishAuthentication(result) {
     saveAuthSession(result.access_token, result.user);
     setUser(result.user);
@@ -377,7 +503,7 @@ function App() {
   }
 
   if (!authReady) return <main className="auth-page"><p>Loading your workspace...</p></main>;
-  if (!user) return <AuthScreen onSuccess={finishAuthentication} theme={theme} onToggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} />;
+  if (!user) return <AuthScreen onSuccess={finishAuthentication} theme={theme} oauthError={oauthError} onToggleTheme={() => setTheme(current => current === "dark" ? "light" : "dark")} />;
 
   function openConversation(id) {
     setConversationId(id);
@@ -417,16 +543,23 @@ function App() {
         {user.role === "admin" && <button className={`nav-item nav-button${activeView === "users" ? " active" : ""}`} aria-current={activeView === "users" ? "page" : undefined} onClick={() => setActiveView("users")}><Users size={17} />Manage users</button>}
         <div className="conversation-list">
           <div className="sidebar-label">PAST CONVERSATIONS ({conversations.length})</div>
-          {conversations.map((conversation, index) => <button
+          {conversations.map((conversation, index) => <div
             className={`conversation-item${conversation.conversation_id === conversationId ? " selected" : ""}`}
-            aria-current={conversation.conversation_id === conversationId ? "page" : undefined}
             key={conversation.conversation_id}
-            onClick={() => openConversation(conversation.conversation_id)}
-            title={conversation.title || "Conversation"}
           >
-            <MessageSquare size={14} />
-            <span>{conversation.title || `Conversation ${index + 1}`}</span>
-          </button>)}
+            <button
+              className="conversation-open"
+              aria-current={conversation.conversation_id === conversationId ? "page" : undefined}
+              onClick={() => openConversation(conversation.conversation_id)}
+              title={conversation.title || "Conversation"}
+            >
+              <MessageSquare size={14} />
+              <span>{conversation.title || `Conversation ${index + 1}`}</span>
+            </button>
+            <button className="conversation-delete" type="button" aria-label={`Delete ${conversation.title || "conversation"}`} title="Delete conversation" onClick={event => handleDeleteConversation(event, conversation)}>
+              <Trash2 size={14} />
+            </button>
+          </div>)}
           {conversations.length === 0 && <p className="empty-docs">Your saved chats will appear here.</p>}
         </div>
         <div className="document-list">
@@ -454,13 +587,14 @@ function App() {
             <div className="admin-workspace">
               <p>New accounts start as users. Assign administrator access only to people who need to manage accounts and access every user's PDFs. Usage totals are tracked since token reporting was enabled.</p>
               <div className="user-table">
-                <div className="user-row user-header usage-user-row"><span>Name</span><span>Email</span><span>Role</span><span>Tokens used</span><span>Est. cost</span></div>
+                <div className="user-row user-header usage-user-row"><span>Name</span><span>Email</span><span>Role</span><span>Tokens used</span><span>Est. cost</span><span>Actions</span></div>
                 {users.map(account => <div className="user-row usage-user-row" key={account.user_id}>
                   <span>{account.display_name}</span><span>{account.email}</span>
                   <select aria-label={`Role for ${account.email}`} value={account.role} onChange={event => handleRoleChange(account.user_id, event.target.value)}>
                     <option value="user">User</option><option value="admin">Admin</option>
                   </select>
                   <span>{formatTokens(account.usage?.total_tokens)}</span><span>{formatCost(account.usage?.estimated_cost_usd)}</span>
+                  <div className="user-actions"><button type="button" onClick={() => startEditingUser(account)}>Edit</button><button type="button" className="delete-user-button" disabled={account.user_id === user.user_id} title={account.user_id === user.user_id ? "You cannot delete your own admin account" : "Delete account"} onClick={() => handleDeleteUser(account)}>Delete</button></div>
                 </div>)}
                 {users.length === 0 && <p className="empty-docs">No accounts found.</p>}
               </div>
@@ -474,6 +608,7 @@ function App() {
                 <article className="usage-stat"><span>Output tokens</span><strong>{formatTokens(usage.output_tokens)}</strong><small>Generated by the models</small></article>
                 <article className="usage-stat"><span>Estimated cost</span><strong>{formatCost(usage.estimated_cost_usd)}</strong><small>Across {formatTokens(usage.requests)} requests</small></article>
               </div>
+              <UsageGraph usage={usage} />
             </div>
           ) : activeView === "tools" ? (
             <div className="tools-workspace">
@@ -560,7 +695,7 @@ function App() {
                 <div className="message-body">
                   <div className="message-author">{message.role === "assistant" ? "AI Assistant" : "You"}</div>
                   <div className="message-content">
-                    {(message.image || message.hasImage) && <MessageImage image={message.image} conversationId={conversationId} messageId={message.messageId} />}
+                    {(message.image || message.hasImage) && <MessageImage image={message.image} conversationId={conversationId} messageId={message.messageId} onOpen={setSelectedImage} />}
                     {message.role === "assistant" ? renderAssistantContent(message.content) : message.content}
                   </div>
                 </div>
@@ -582,6 +717,25 @@ function App() {
               <button className="auth-submit" onClick={askAboutDocument}>Ask about this PDF</button>
             </div>
           </section>
+        </div>}
+
+        {editingUser && <div className="modal-backdrop" onClick={() => setEditingUser(null)}>
+          <form className="document-dialog user-edit-dialog" role="dialog" aria-modal="true" aria-labelledby="edit-user-title" onSubmit={saveUserDetails} onClick={event => event.stopPropagation()}>
+            <h2 id="edit-user-title">Edit account details</h2>
+            <label>Name<input required maxLength={80} value={editUserName} onChange={event => setEditUserName(event.target.value)} /></label>
+            <label>Email<input required type="email" maxLength={254} value={editUserEmail} onChange={event => setEditUserEmail(event.target.value)} /></label>
+            <div className="document-dialog-actions">
+              <button type="button" className="auth-switch" onClick={() => setEditingUser(null)}>Cancel</button>
+              <button className="auth-submit">Save changes</button>
+            </div>
+          </form>
+        </div>}
+
+        {selectedImage && <div className="image-viewer-backdrop" onClick={() => setSelectedImage("")}>
+          <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Full-size chat image" onClick={event => event.stopPropagation()}>
+            <button type="button" className="image-viewer-close" aria-label="Close image" onClick={() => setSelectedImage("")}><X size={20} /></button>
+            <img src={selectedImage} alt="Full-size image attached to the chat" />
+          </div>
         </div>}
 
         {(error || notice) && <div className={error ? "error-banner" : "notice-banner"}>{error || <><CheckCircle2 size={16} />{notice}</>}</div>}
