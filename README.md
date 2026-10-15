@@ -64,12 +64,17 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 
 For web search, set `TAVILY_API_KEY` in `backend/.env`. Search requests are sent
 server-side to Tavily; without this key, web search is unavailable. PDF retrieval
-combines dense embeddings with BM25 keyword matching and reciprocal-rank fusion.
-Relevant earlier messages from the same account are retrieved for chat context.
+combines dense embeddings and BM25 keyword search, fuses candidate ranks, then
+reranks passages using vector similarity and query-term coverage. Retrieval is
+filtered by account ownership and can additionally filter by exact filename,
+PDF ID, or page. Tune `RAG_TOP_K`, `RAG_CANDIDATE_K`,
+`RAG_LEXICAL_MAX_DOCUMENTS`, and the `RAG_RERANK_*_WEIGHT` settings in
+`backend/.env`; changes take effect after restarting the backend. Relevant
+earlier messages from the same account are retrieved for chat context.
 
 Start the API:
 ```powershell
-.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+.\venv\Scripts\python.exe -m uvicorn app.main:app --reload --reload-dir app --port 8000
 ```
 
 API docs: http://localhost:8000/docs

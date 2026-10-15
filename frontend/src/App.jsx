@@ -4,7 +4,7 @@ import {
   Sparkles, Wrench, Paperclip, FileText, CheckCircle2, Shield, LogOut, Users, Sun, Moon, Activity
 } from "lucide-react";
 import {
-  fetchConversation, fetchConversationImage, sendChatMessage, uploadPdf, getDocuments, getConversations, deleteConversation,
+  fetchConversation, fetchConversationImage, sendChatMessage, uploadPdfs, getDocuments, getDocumentPages, getDocumentPage, getConversations, deleteConversation,
   login, register, getOAuthProviders, getCurrentUser, saveAuthSession, clearAuthSession, getUsers, updateUserRole, updateUserDetails, deleteUser, getUsage
 } from "./api";
 
@@ -233,7 +233,7 @@ function AuthScreen({ onSuccess, theme, onToggleTheme, oauthError }) {
       <button type="button" className="theme-toggle auth-theme-toggle" onClick={onToggleTheme} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}>
         {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}{theme === "dark" ? "Light mode" : "Dark mode"}
       </button>
-      <div className="auth-brand"><div className="brand-icon"><Bot size={23} /></div><span>NEURALDESK WORKSPACE</span></div>
+      <div className="auth-brand"><div className="brand-icon"><BrandMark /></div><span>NEXADESK · AI KNOWLEDGE WORKSPACE</span></div>
       <h1>{isRegister ? "Create your account" : "Welcome back"}</h1>
       <p>Sign in to access your conversations and workspace.</p>
       {isRegister && <label>Name<input required autoComplete="name" maxLength={80} value={displayName} onChange={event => setDisplayName(event.target.value)} /></label>}
@@ -263,6 +263,13 @@ function GithubMark() {
   return <svg aria-hidden="true" viewBox="0 0 24 24" width="17" height="17" fill="currentColor"><path d="M12 .9a11.1 11.1 0 0 0-3.5 21.6c.6.1.8-.2.8-.5v-2c-3.3.7-4-1.4-4-1.4-.5-1.3-1.3-1.6-1.3-1.6-1.1-.8.1-.8.1-.8 1.2.1 1.8 1.2 1.8 1.2 1.1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.8-1.6-2.7-.3-5.6-1.3-5.6-6.2 0-1.4.5-2.5 1.2-3.4-.1-.3-.5-1.6.1-3.3 0 0 1-.3 3.5 1.3a12.2 12.2 0 0 1 6.4 0c2.4-1.6 3.5-1.3 3.5-1.3.7 1.7.3 3 .2 3.3.8.9 1.2 2 1.2 3.4 0 4.9-3 5.9-5.7 6.2.5.4.9 1.1.9 2.2V22c0 .3.2.6.8.5A11.1 11.1 0 0 0 12 .9Z"/></svg>;
 }
 
+function BrandMark() {
+  return <svg aria-hidden="true" viewBox="0 0 32 32" width="25" height="25" fill="none">
+    <path d="M8 23V9l16 14V9" stroke="currentColor" strokeWidth="3.5" strokeLinecap="round" strokeLinejoin="round" />
+    <circle cx="8" cy="9" r="2" fill="currentColor" /><circle cx="24" cy="23" r="2" fill="currentColor" />
+  </svg>;
+}
+
 function App() {
   const [theme, setTheme] = useState(() => localStorage.getItem("advanced-rag-theme") || "light");
   const [user, setUser] = useState(() => {
@@ -289,6 +296,8 @@ function App() {
   const [editUserEmail, setEditUserEmail] = useState("");
   const [usage, setUsage] = useState({ input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0, requests: 0 });
   const [selectedDocument, setSelectedDocument] = useState(null);
+  const [documentPreview, setDocumentPreview] = useState(null);
+  const [loadingDocument, setLoadingDocument] = useState(false);
   const [selectedImage, setSelectedImage] = useState("");
   const [specificDocumentId, setSpecificDocumentId] = useState("");
   const [specificQuery, setSpecificQuery] = useState("");
@@ -416,13 +425,18 @@ function App() {
   }
 
   async function handleUpload(event) {
-    const file = event.target.files?.[0];
+    const files = Array.from(event.target.files || []);
     event.target.value = "";
-    if (!file) return;
+    if (!files.length) return;
     setError(""); setNotice(""); setUploading(true);
     try {
-      const result = await uploadPdf(file);
-      setNotice(`${result.filename} uploaded. Indexed ${result.chunks} text chunks from ${result.pages_with_text} pages.`);
+      const result = await uploadPdfs(files);
+      const uploaded = result.uploaded || [];
+      const failed = result.failed || [];
+      const successText = uploaded.length
+        ? `Uploaded ${uploaded.length} PDF${uploaded.length === 1 ? "" : "s"}: ${uploaded.map(item => item.filename).join(", ")}.`
+        : "No PDFs were uploaded.";
+      setNotice(failed.length ? `${successText} Failed: ${failed.map(item => `${item.filename}: ${item.error}`).join("; ")}` : successText);
       setDocuments(await getDocuments());
     } catch (err) {
       setError(err.message || "PDF upload failed.");
@@ -527,12 +541,45 @@ function App() {
     if (filename) tryTool(`Summarize ${filename} and explain its key points.`);
   }
 
+  async function openDocument(document) {
+    setSelectedDocument(document);
+    setDocumentPreview(null);
+    setLoadingDocument(true);
+    setError("");
+    try {
+      const result = await getDocumentPages(document.document_id);
+      const firstPage = result.pages?.[0];
+      if (firstPage === undefined) {
+        setDocumentPreview({ ...result, page: null, text: "No searchable text was found for this PDF." });
+      } else {
+        setDocumentPreview(await getDocumentPage(document.document_id, firstPage));
+      }
+    } catch (err) {
+      setError(err.message || "Could not load PDF text.");
+      setSelectedDocument(null);
+    } finally {
+      setLoadingDocument(false);
+    }
+  }
+
+  async function changeDocumentPage(page) {
+    if (!selectedDocument || loadingDocument) return;
+    setLoadingDocument(true);
+    try {
+      setDocumentPreview(await getDocumentPage(selectedDocument.document_id, page));
+    } catch (err) {
+      setError(err.message || "Could not load this PDF page.");
+    } finally {
+      setLoadingDocument(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
         <div className="brand">
-          <div className="brand-icon"><Bot size={23} /></div>
-          <div><h2>NeuralDesk</h2><span>RAG AI WORKSPACE</span></div>
+          <div className="brand-icon"><BrandMark /></div>
+          <div><h2>NexaDesk</h2><span>AI KNOWLEDGE WORKSPACE</span></div>
         </div>
         <button className="new-chat" onClick={startNewChat}><Plus size={18} />New conversation</button>
         <div className="sidebar-label">YOUR WORKSPACE</div>
@@ -541,6 +588,7 @@ function App() {
         <button className={`nav-item nav-button${activeView === "tools" ? " active" : ""}`} aria-current={activeView === "tools" ? "page" : undefined} onClick={startCalculatorPrompt}><Wrench size={17} />Tools</button>
         <button className={`nav-item nav-button${activeView === "usage" ? " active" : ""}`} aria-current={activeView === "usage" ? "page" : undefined} onClick={() => setActiveView("usage")}><Activity size={17} />Usage & cost</button>
         {user.role === "admin" && <button className={`nav-item nav-button${activeView === "users" ? " active" : ""}`} aria-current={activeView === "users" ? "page" : undefined} onClick={() => setActiveView("users")}><Users size={17} />Manage users</button>}
+        <button className={`nav-item nav-button${activeView === "documents" ? " active" : ""}`} aria-current={activeView === "documents" ? "page" : undefined} onClick={() => setActiveView("documents")}><FileText size={17} />Knowledge files ({documents.length})</button>
         <div className="conversation-list">
           <div className="sidebar-label">PAST CONVERSATIONS ({conversations.length})</div>
           {conversations.map((conversation, index) => <div
@@ -562,18 +610,13 @@ function App() {
           </div>)}
           {conversations.length === 0 && <p className="empty-docs">Your saved chats will appear here.</p>}
         </div>
-        <div className="document-list">
-          <div className="sidebar-label">KNOWLEDGE FILES ({documents.length})</div>
-          {documents.map(doc => <button className="document-item" key={doc.document_id} onClick={() => setSelectedDocument(doc)} title={`${doc.filename} · ${doc.chunks} indexed text chunks`}><FileText size={14} /><span>{doc.filename}</span></button>)}
-          {documents.length === 0 && <p className="empty-docs">No PDFs uploaded yet.</p>}
-        </div>
-        <input ref={fileInput} type="file" accept=".pdf,application/pdf" hidden onChange={handleUpload} />
+        <input ref={fileInput} type="file" accept=".pdf,application/pdf" multiple hidden onChange={handleUpload} />
         <div className="sidebar-bottom"><div className="status-dot" /><div><strong>{user.display_name}</strong><span>{user.role === "admin" ? "Administrator" : "User"} · {user.email}</span></div><button className="logout-button" title="Sign out" aria-label="Sign out" onClick={logout}><LogOut size={15} /></button></div>
       </aside>
 
       <main className="main-panel">
         <header className="topbar">
-          <div><span className="eyebrow">WORKSPACE / {activeView === "tools" ? "TOOLS" : activeView === "users" ? "ACCESS" : activeView === "usage" ? "USAGE" : "CHAT"}</span><h1>{activeView === "tools" ? "Available tools" : activeView === "users" ? "Manage users" : activeView === "usage" ? "Token usage & estimated cost" : "AI Assistant"}</h1></div>
+          <div><span className="eyebrow">WORKSPACE / {activeView === "tools" ? "TOOLS" : activeView === "users" ? "ACCESS" : activeView === "usage" ? "USAGE" : activeView === "documents" ? "FILES" : "CHAT"}</span><h1>{activeView === "tools" ? "Available tools" : activeView === "users" ? "Manage users" : activeView === "usage" ? "Token usage & estimated cost" : activeView === "documents" ? "Knowledge files" : "AI Assistant"}</h1></div>
           <div className="topbar-actions">
             <button type="button" className="theme-toggle" onClick={() => setTheme(current => current === "dark" ? "light" : "dark")} aria-label={`Switch to ${theme === "dark" ? "light" : "dark"} mode`} title={`Switch to ${theme === "dark" ? "light" : "dark"} mode`}>
               {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}{theme === "dark" ? "Light mode" : "Dark mode"}
@@ -583,7 +626,15 @@ function App() {
         </header>
 
         <section className="chat-area">
-          {activeView === "users" && user.role === "admin" ? (
+          {activeView === "documents" ? (
+            <div className="files-workspace">
+              <p className="tools-intro">Browse and open the PDF files available to your account.</p>
+              {documents.length ? <div className="files-grid">{documents.map(doc => <button className="file-card" key={doc.document_id} onClick={() => openDocument(doc)} title={`Open ${doc.filename}`}>
+                <span className="file-card-icon"><FileText size={21} /></span>
+                <span className="file-card-details"><strong>{doc.filename}</strong><small>{doc.chunks} searchable text chunks · {doc.pages_with_text || 0} pages with text</small>{doc.uploaded_by && <small>Uploaded by {doc.uploaded_by}</small>}</span>
+              </button>)}</div> : <div className="files-empty"><FileText size={24} /><strong>No PDF files yet</strong><span>Upload a PDF to add it to your knowledge files.</span><button type="button" onClick={() => fileInput.current?.click()}>Upload PDFs</button></div>}
+            </div>
+          ) : activeView === "users" && user.role === "admin" ? (
             <div className="admin-workspace">
               <p>New accounts start as users. Assign administrator access only to people who need to manage accounts and access every user's PDFs. Usage totals are tracked since token reporting was enabled.</p>
               <div className="user-table">
@@ -669,7 +720,7 @@ function App() {
                   <h2>Upload a PDF</h2>
                   <p>Add a private PDF to your knowledge files. Only you and administrators can see or search it.</p>
                   <span className="tool-example">PDF files up to the configured size limit</span>
-                  <button onClick={() => fileInput.current?.click()}>Choose a PDF</button>
+                  <button onClick={() => fileInput.current?.click()}>Choose PDFs</button>
                 </article>
               </div>
             </div>
@@ -707,11 +758,25 @@ function App() {
         </section>
 
         {selectedDocument && <div className="modal-backdrop" onClick={() => setSelectedDocument(null)}>
-          <section className="document-dialog" role="dialog" aria-modal="true" aria-labelledby="document-dialog-title" onClick={event => event.stopPropagation()}>
-            <div className="tool-card-icon"><FileText size={20} /></div>
-            <h2 id="document-dialog-title">{selectedDocument.filename}</h2>
-            <p>{selectedDocument.chunks} searchable text chunks</p>
-            {selectedDocument.uploaded_by && <p>Uploaded by {selectedDocument.uploaded_by}</p>}
+          <section className="document-dialog pdf-document-dialog" role="dialog" aria-modal="true" aria-labelledby="document-dialog-title" onClick={event => event.stopPropagation()}>
+            <header className="pdf-dialog-header">
+              <div className="tool-card-icon"><FileText size={20} /></div>
+              <div className="pdf-dialog-title-group"><span className="pdf-dialog-eyebrow">PDF DOCUMENT</span><h2 id="document-dialog-title">{selectedDocument.filename}</h2></div>
+              <button className="pdf-dialog-close" type="button" aria-label="Close PDF preview" onClick={() => setSelectedDocument(null)}><X size={18} /></button>
+            </header>
+            <div className="pdf-document-meta">
+              <span>{selectedDocument.chunks} searchable chunks</span>
+              <span>{documentPreview?.pages?.length || selectedDocument.pages_with_text || 0} pages with text</span>
+              {selectedDocument.uploaded_by && <span>Uploaded by {selectedDocument.uploaded_by}</span>}
+            </div>
+            <div className="pdf-preview-toolbar">
+              <span>{documentPreview?.page ? `Page ${documentPreview.page} · ${documentPreview.pages.indexOf(documentPreview.page) + 1} of ${documentPreview.pages.length}` : "Extracted PDF text"}</span>
+              {documentPreview?.page && <div>
+                <button type="button" disabled={loadingDocument || documentPreview.pages.indexOf(documentPreview.page) <= 0} onClick={() => changeDocumentPage(documentPreview.pages[documentPreview.pages.indexOf(documentPreview.page) - 1])}>Previous</button>
+                <button type="button" disabled={loadingDocument || documentPreview.pages.indexOf(documentPreview.page) >= documentPreview.pages.length - 1} onClick={() => changeDocumentPage(documentPreview.pages[documentPreview.pages.indexOf(documentPreview.page) + 1])}>Next</button>
+              </div>}
+            </div>
+            <div className={`pdf-text-preview${loadingDocument ? " is-loading" : ""}`} aria-live="polite">{loadingDocument ? "Loading extracted text..." : documentPreview?.text || "Loading extracted text..."}</div>
             <div className="document-dialog-actions">
               <button className="auth-switch" onClick={() => setSelectedDocument(null)}>Close</button>
               <button className="auth-submit" onClick={askAboutDocument}>Ask about this PDF</button>
@@ -760,7 +825,7 @@ function App() {
                 <ImagePlus size={15} />Add image
               </button>
               <button type="button" className="attach-button" onClick={() => fileInput.current?.click()} disabled={uploading}>
-                <Paperclip size={15} />{uploading ? "Uploading..." : "Upload PDF"}
+                <Paperclip size={15} />{uploading ? "Uploading..." : "Upload PDFs"}
               </button>
               <span>Verify important information.</span>
             </div>

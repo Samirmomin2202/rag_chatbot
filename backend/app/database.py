@@ -237,7 +237,7 @@ def assign_legacy_conversations(owner_id: str):
         {"$set": {"owner_id": owner_id}},
     )
 
-def save_document_metadata(document_id: str, filename: str, chunks: int, owner_id: str, owner_name: str):
+def save_document_metadata(document_id: str, filename: str, chunks: int, owner_id: str, owner_name: str, pages: list[int] | None = None):
     get_database()
     documents_collection.update_one(
         {"document_id": document_id},
@@ -245,6 +245,8 @@ def save_document_metadata(document_id: str, filename: str, chunks: int, owner_i
             "document_id": document_id,
             "filename": filename,
             "chunks": chunks,
+            "pages": pages or [],
+            "pages_with_text": len(pages or []),
             "owner_id": owner_id,
             "uploaded_by": owner_name,
             "uploaded_at": datetime.now(timezone.utc),
@@ -256,5 +258,9 @@ def list_documents(owner_id: str, is_admin: bool = False):
     get_database()
     query = {} if is_admin else {"owner_id": owner_id}
     return list(documents_collection.find(
-        query, {"_id": 0, "document_id": 1, "filename": 1, "chunks": 1, "uploaded_at": 1, "uploaded_by": 1}
+        query, {"_id": 0, "document_id": 1, "filename": 1, "chunks": 1, "pages": 1, "pages_with_text": 1, "uploaded_at": 1, "uploaded_by": 1}
     ).sort("uploaded_at", -1).limit(100))
+
+def get_document_metadata(document_id: str):
+    get_database()
+    return documents_collection.find_one({"document_id": document_id}, {"_id": 0})

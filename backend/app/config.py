@@ -21,6 +21,13 @@ class Settings:
     EMBEDDING_MODEL = os.getenv(
         "EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2"
     )
+    RAG_TOP_K = max(1, min(20, int(os.getenv("RAG_TOP_K", "5"))))
+    RAG_CANDIDATE_K = max(RAG_TOP_K, min(100, int(os.getenv("RAG_CANDIDATE_K", "30"))))
+    RAG_LEXICAL_MAX_DOCUMENTS = max(100, min(100000, int(os.getenv("RAG_LEXICAL_MAX_DOCUMENTS", "10000"))))
+    RAG_RERANK_FUSION_WEIGHT = max(0.0, min(1.0, float(os.getenv("RAG_RERANK_FUSION_WEIGHT", "0.35"))))
+    RAG_RERANK_BM25_WEIGHT = max(0.0, min(1.0, float(os.getenv("RAG_RERANK_BM25_WEIGHT", "0.30"))))
+    RAG_RERANK_SEMANTIC_WEIGHT = max(0.0, min(1.0, float(os.getenv("RAG_RERANK_SEMANTIC_WEIGHT", "0.25"))))
+    RAG_RERANK_TERM_WEIGHT = max(0.0, min(1.0, float(os.getenv("RAG_RERANK_TERM_WEIGHT", "0.10"))))
     FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")
     FRONTEND_ORIGINS = [
         origin.strip()

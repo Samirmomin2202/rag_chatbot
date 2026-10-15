@@ -111,7 +111,21 @@ export async function uploadPdf(file) {
   return request("/api/documents/upload", { method: "POST", body: form });
 }
 
+export async function uploadPdfs(files) {
+  const form = new FormData();
+  files.forEach(file => form.append("files", file));
+  return request("/api/documents/upload-multiple", { method: "POST", body: form });
+}
+
 export async function getDocuments() {
   const data = await request("/api/documents");
   return data.documents || [];
+}
+
+export async function getDocumentPages(documentId) {
+  return request(`/api/documents/${encodeURIComponent(documentId)}/pages`);
+}
+
+export async function getDocumentPage(documentId, page) {
+  return request(`/api/documents/${encodeURIComponent(documentId)}/pages/${encodeURIComponent(page)}`);
 }

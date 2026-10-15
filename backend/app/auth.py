@@ -15,9 +15,10 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel, Field
-from pymongo.errors import ServerSelectionTimeoutError
+from pymongo.errors import ConfigurationError, ServerSelectionTimeoutError
 
 from app.config import settings
+from app.db_errors import mongodb_unavailable_detail
 from app.database import (
     create_user,
     find_user_by_email,
@@ -178,11 +179,7 @@ def _ensure_admin():
 def _raise_database_unavailable(exc: Exception):
     raise HTTPException(
         status_code=503,
-        detail=(
-            "Cannot connect to MongoDB Atlas. Check that the cluster is active, "
-            "this computer's current public IP is in Atlas Network Access, and "
-            "outbound TCP port 27017 is allowed."
-        ),
+        detail=mongodb_unavailable_detail(exc),
     ) from exc
 
 
@@ -192,7 +189,7 @@ def current_user(credentials: HTTPAuthorizationCredentials | None = Depends(bear
     claims = _decode_token(credentials.credentials)
     try:
         user = find_user_by_id(claims["sub"])
-    except ServerSelectionTimeoutError as exc:
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
         _raise_database_unavailable(exc)
     if not user:
         raise HTTPException(status_code=401, detail="Account not found. Please sign in again.")
@@ -321,7 +318,7 @@ def oauth_callback(provider: str, request: Request, code: str = "", state: str =
         return _frontend_oauth_redirect(provider, token=_issue_token(user))
     except HTTPException as exc:
         return _frontend_oauth_redirect(provider, error=exc.detail)
-    except ServerSelectionTimeoutError as exc:
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
         try:
             _raise_database_unavailable(exc)
         except HTTPException as db_exc:
@@ -336,10 +333,14 @@ def register(body: Registration):
     _auth_secret()
     try:
         _ensure_admin()
-    except ServerSelectionTimeoutError as exc:
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
         _raise_database_unavailable(exc)
     email = _email(body.email)
-    if find_user_by_email(email):
+    try:
+        existing = find_user_by_email(email)
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        _raise_database_unavailable(exc)
+    if existing:
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
     user = {
         "user_id": str(uuid4()),
@@ -351,6 +352,8 @@ def register(body: Registration):
     }
     try:
         create_user(user)
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        _raise_database_unavailable(exc)
     except Exception:
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
     return _auth_response(user)
@@ -362,7 +365,7 @@ def login(body: Login):
     try:
         _ensure_admin()
         user = find_user_by_email(_email(body.email))
-    except ServerSelectionTimeoutError as exc:
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
         _raise_database_unavailable(exc)
     if not user or not _verify_password(body.password, user.get("password_hash", "")):
         raise HTTPException(status_code=401, detail="Email or password is incorrect.")

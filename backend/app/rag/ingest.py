@@ -56,7 +56,10 @@ def ingest_pdf(filename: str, file_bytes: bytes, owner_id: str, owner_name: str)
         embeddings=vectors,
         metadatas=metadatas,
     )
-    save_document_metadata(document_id, filename, len(texts), owner_id, owner_name)
+    save_document_metadata(
+        document_id, filename, len(texts), owner_id, owner_name,
+        pages=[page for page, _ in page_texts],
+    )
     return {
         "document_id": document_id,
         "filename": filename,

@@ -6,11 +6,13 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from pymongo.errors import ConfigurationError, ServerSelectionTimeoutError
 
 from app.config import settings
-from app.database import check_mongodb, get_history, get_conversation_image, get_latest_conversation_image, save_message, list_documents, list_conversations, delete_conversation, retrieve_related_memories, record_user_usage
+from app.db_errors import mongodb_unavailable_detail
+from app.database import check_mongodb, get_history, get_conversation_image, get_latest_conversation_image, save_message, list_documents, get_document_metadata, list_conversations, delete_conversation, retrieve_related_memories, record_user_usage
 from app.auth import router as auth_router, admin_router, current_user, admin_user
-from app.chroma_store import get_chroma_status
+from app.chroma_store import documents_collection as chroma_documents, get_chroma_status
 from app.services.agent import generate_answer
 from app.rag.ingest import ingest_pdf
 
@@ -20,6 +22,9 @@ app.include_router(admin_router)
 
 @app.exception_handler(Exception)
 async def handle_unexpected_error(request: Request, exc: Exception):
+    if isinstance(exc, (ConfigurationError, ServerSelectionTimeoutError)):
+        logging.warning("MongoDB unavailable during %s %s: %s", request.method, request.url.path, type(exc).__name__)
+        return JSONResponse(status_code=503, content={"detail": mongodb_unavailable_detail(exc)})
     logging.exception("Unhandled API error on %s %s", request.method, request.url.path)
     return JSONResponse(status_code=500, content={"detail": "Unexpected server error. Check the backend terminal for the cause."})
 
@@ -88,6 +93,8 @@ def chat(request: ChatRequest, user: dict = Depends(current_user)):
             "usage": usage,
             "usage_total": usage_total,
         }
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
     except Exception as exc:
         print(f"Chat request failed: {type(exc).__name__}: {exc}")
         raise HTTPException(
@@ -102,6 +109,8 @@ def conversation_history(conversation_id: str, user: dict = Depends(current_user
             "conversation_id": conversation_id,
             "messages": get_history(conversation_id, user["user_id"], limit=100, include_images=True),
         }
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
     except Exception as exc:
         print(f"History request failed: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail="Could not retrieve conversation history.") from exc
@@ -125,6 +134,8 @@ def conversation_image(conversation_id: str, message_id: str, user: dict = Depen
 def conversations(user: dict = Depends(current_user)):
     try:
         return {"conversations": list_conversations(user["user_id"])}
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
     except Exception as exc:
         print(f"Conversation listing failed: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail="Could not list conversations.") from exc
@@ -138,6 +149,8 @@ def remove_conversation(conversation_id: str, user: dict = Depends(current_user)
         return {"message": "Conversation deleted."}
     except HTTPException:
         raise
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
     except Exception as exc:
         print(f"Conversation deletion failed: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail="Could not delete conversation.") from exc
@@ -163,17 +176,108 @@ async def upload_document(file: UploadFile = File(...), user: dict = Depends(cur
         return {"message": "PDF processed successfully.", **result}
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
     except Exception as exc:
         print(f"PDF ingestion failed: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail="Could not process PDF. Check backend terminal.") from exc
+
+@app.post("/api/documents/upload-multiple")
+async def upload_multiple_documents(files: list[UploadFile] = File(...), user: dict = Depends(current_user)):
+    if not files:
+        raise HTTPException(status_code=400, detail="Select at least one PDF.")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Upload up to 10 PDFs at a time.")
+    uploaded = []
+    failed = []
+    for file in files:
+        filename = (file.filename or "upload.pdf").replace("\\", "/").split("/")[-1]
+        if not filename.lower().endswith(".pdf"):
+            failed.append({"filename": filename, "error": "Only PDF files are supported."})
+            continue
+        content = await file.read()
+        max_bytes = settings.MAX_PDF_MB * 1024 * 1024
+        if len(content) > max_bytes:
+            failed.append({"filename": filename, "error": f"PDF exceeds the {settings.MAX_PDF_MB} MB limit."})
+            continue
+        if not content:
+            failed.append({"filename": filename, "error": "The uploaded file is empty."})
+            continue
+        try:
+            uploaded.append(ingest_pdf(filename, content, owner_id=user["user_id"], owner_name=user["display_name"]))
+        except ValueError as exc:
+            failed.append({"filename": filename, "error": str(exc)})
+        except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+            raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
+        except Exception as exc:
+            print(f"PDF ingestion failed for {filename}: {type(exc).__name__}: {exc}")
+            failed.append({"filename": filename, "error": "Could not process this PDF."})
+    return {"uploaded": uploaded, "failed": failed}
 
 @app.get("/api/documents")
 def documents(user: dict = Depends(current_user)):
     try:
         return {"documents": list_documents(user["user_id"], is_admin=user["role"] == "admin")}
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
     except Exception as exc:
         print(f"Document listing failed: {type(exc).__name__}: {exc}")
         raise HTTPException(status_code=500, detail="Could not list documents.") from exc
+
+@app.get("/api/documents/{document_id}/pages")
+def document_pages(document_id: str, user: dict = Depends(current_user)):
+    try:
+        metadata = get_document_metadata(document_id)
+        if not metadata or (user["role"] != "admin" and metadata.get("owner_id") != user["user_id"]):
+            raise HTTPException(status_code=404, detail="Document not found.")
+        chunks = chroma_documents.get(where={"document_id": document_id}, include=["metadatas"])
+        pages = sorted({item.get("page") for item in chunks.get("metadatas", []) if item.get("page") is not None})
+        return {"document_id": document_id, "filename": metadata["filename"], "pages": pages}
+    except HTTPException:
+        raise
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
+    except Exception as exc:
+        print(f"PDF page listing failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not list PDF pages.") from exc
+
+@app.get("/api/documents/{document_id}/pages/{page_number}")
+def document_page(document_id: str, page_number: int, user: dict = Depends(current_user)):
+    try:
+        metadata = get_document_metadata(document_id)
+        if not metadata or (user["role"] != "admin" and metadata.get("owner_id") != user["user_id"]):
+            raise HTTPException(status_code=404, detail="Document not found.")
+        accessible_chunks = chroma_documents.get(
+            where={"document_id": document_id}, include=["metadatas"],
+        )
+        pages = sorted({item.get("page") for item in accessible_chunks.get("metadatas", []) if item.get("page") is not None})
+        if page_number not in pages:
+            raise HTTPException(status_code=404, detail="Page not found.")
+        result = chroma_documents.get(
+            where={"$and": [
+                {"document_id": {"$eq": document_id}},
+                {"page": {"$eq": page_number}},
+            ]},
+            include=["documents"],
+        )
+        chunks = sorted(zip(result.get("ids", []), result.get("documents", [])), key=lambda item: int(item[0].rsplit("-", 1)[-1]))
+        text = chunks[0][1] if chunks else ""
+        for _, chunk in chunks[1:]:
+            text += chunk[150:]
+        return {
+            "document_id": document_id,
+            "filename": metadata["filename"],
+            "page": page_number,
+            "pages": pages,
+            "text": text,
+        }
+    except HTTPException:
+        raise
+    except (ConfigurationError, ServerSelectionTimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=mongodb_unavailable_detail(exc)) from exc
+    except Exception as exc:
+        print(f"PDF page retrieval failed: {type(exc).__name__}: {exc}")
+        raise HTTPException(status_code=500, detail="Could not load PDF text.") from exc
 
 # Wrap the complete application so CORS headers are present on unexpected 500
 # responses as well as successful responses and handled HTTP errors.
