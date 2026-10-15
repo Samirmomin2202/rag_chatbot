@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.config import settings
-from app.database import check_mongodb, get_history, get_conversation_image, save_message, list_documents, list_conversations, delete_conversation, retrieve_related_memories, record_user_usage
+from app.database import check_mongodb, get_history, get_conversation_image, get_latest_conversation_image, save_message, list_documents, list_conversations, delete_conversation, retrieve_related_memories, record_user_usage
 from app.auth import router as auth_router, admin_router, current_user, admin_user
 from app.chroma_store import get_chroma_status
 from app.services.agent import generate_answer
@@ -64,12 +64,18 @@ def chat(request: ChatRequest, user: dict = Depends(current_user)):
         history = get_history(conversation_id, user["user_id"], limit=12)
         save_message(conversation_id, user["user_id"], "user", message, image=request.image)
         history.append({"role": "user", "content": message, "image": request.image} if request.image else {"role": "user", "content": message})
+        image_context = (
+            {"content": message, "image": request.image}
+            if request.image
+            else get_latest_conversation_image(conversation_id, user["user_id"])
+        )
         memories = retrieve_related_memories(message, user["user_id"], conversation_id)
         result = generate_answer(
             history,
             owner_id=user["user_id"],
             is_admin=user["role"] == "admin",
             memories=memories,
+            reference_image=image_context,
         )
         answer = result["answer"]
         usage = result.get("usage", {})

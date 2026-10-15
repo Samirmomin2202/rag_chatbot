@@ -149,7 +149,7 @@ function CodeBlock({ code, language }) {
   </section>;
 }
 
-function MessageImage({ image, conversationId, messageId }) {
+function MessageImage({ image, conversationId, messageId, onOpen }) {
   const imageRef = useRef(null);
   const [src, setSrc] = useState(() => image?.startsWith("data:image/") ? image : "");
   const [failed, setFailed] = useState(false);
@@ -170,7 +170,9 @@ function MessageImage({ image, conversationId, messageId }) {
   }, [src]);
 
   if (!src) return <div ref={imageRef} className="message-image-placeholder">{failed ? "Image unavailable" : "Image · loads when visible"}</div>;
-  return <img className="message-image" src={src} alt="Image attached to this message" loading="lazy" />;
+  return <button type="button" className="message-image-trigger" onClick={() => onOpen(src)} aria-label="Open attached image">
+    <img className="message-image" src={src} alt="Image attached to this message. Click to view full size." loading="lazy" />
+  </button>;
 }
 
 function UsageGraph({ usage }) {
@@ -287,6 +289,7 @@ function App() {
   const [editUserEmail, setEditUserEmail] = useState("");
   const [usage, setUsage] = useState({ input_tokens: 0, output_tokens: 0, total_tokens: 0, estimated_cost_usd: 0, requests: 0 });
   const [selectedDocument, setSelectedDocument] = useState(null);
+  const [selectedImage, setSelectedImage] = useState("");
   const [specificDocumentId, setSpecificDocumentId] = useState("");
   const [specificQuery, setSpecificQuery] = useState("");
   const fileInput = useRef(null);
@@ -377,6 +380,13 @@ function App() {
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
+
+  useEffect(() => {
+    if (!selectedImage) return undefined;
+    const closeOnEscape = event => { if (event.key === "Escape") setSelectedImage(""); };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [selectedImage]);
 
   async function handleSend(event) {
     event?.preventDefault();
@@ -685,7 +695,7 @@ function App() {
                 <div className="message-body">
                   <div className="message-author">{message.role === "assistant" ? "AI Assistant" : "You"}</div>
                   <div className="message-content">
-                    {(message.image || message.hasImage) && <MessageImage image={message.image} conversationId={conversationId} messageId={message.messageId} />}
+                    {(message.image || message.hasImage) && <MessageImage image={message.image} conversationId={conversationId} messageId={message.messageId} onOpen={setSelectedImage} />}
                     {message.role === "assistant" ? renderAssistantContent(message.content) : message.content}
                   </div>
                 </div>
@@ -719,6 +729,13 @@ function App() {
               <button className="auth-submit">Save changes</button>
             </div>
           </form>
+        </div>}
+
+        {selectedImage && <div className="image-viewer-backdrop" onClick={() => setSelectedImage("")}>
+          <div className="image-viewer" role="dialog" aria-modal="true" aria-label="Full-size chat image" onClick={event => event.stopPropagation()}>
+            <button type="button" className="image-viewer-close" aria-label="Close image" onClick={() => setSelectedImage("")}><X size={20} /></button>
+            <img src={selectedImage} alt="Full-size image attached to the chat" />
+          </div>
         </div>}
 
         {(error || notice) && <div className={error ? "error-banner" : "notice-banner"}>{error || <><CheckCircle2 size={16} />{notice}</>}</div>}

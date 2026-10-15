@@ -82,6 +82,15 @@ def get_conversation_image(conversation_id: str, owner_id: str, message_id: str)
     )
     return message.get("image") if message else None
 
+def get_latest_conversation_image(conversation_id: str, owner_id: str):
+    get_database()
+    message = messages_collection.find_one(
+        {"conversation_id": conversation_id, "owner_id": owner_id, "role": "user", "image": {"$exists": True}},
+        {"_id": 0, "content": 1, "image": 1},
+        sort=[("created_at", -1)],
+    )
+    return message
+
 def list_conversations(owner_id: str, limit: int = 50):
     get_database()
     return list(messages_collection.aggregate([
