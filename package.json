@@ -1,0 +1,9 @@
+{
+  "name": "advanced-rag-chatbot",
+  "private": true,
+  "scripts": {
+    "frontend:install": "npm --prefix frontend install --include=dev",
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build"
+  }
+}

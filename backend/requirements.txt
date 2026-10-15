@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+groq
+pymongo[srv]
+pydantic-settings
+python-dotenv
+chromadb
+sentence-transformers
+pypdf
+python-multipart
